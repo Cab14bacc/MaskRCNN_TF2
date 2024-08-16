@@ -88,4 +88,3 @@ mrcnn.visualize.display_instances(image=image,
                                   class_names=CLASS_NAMES, 
                                   scores=r['scores'])
 
-
