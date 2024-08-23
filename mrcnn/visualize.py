@@ -144,7 +144,7 @@ def display_instances(image, boxes, masks, class_ids, class_names,
         else:
             caption = captions[i]
         ax.text(x1, y1 + 8, caption,
-                color='w', size=11, backgroundcolor="none")
+                color='w', size=8, backgroundcolor="none")
 
         # Mask
         mask = masks[:, :, i]
@@ -165,6 +165,8 @@ def display_instances(image, boxes, masks, class_ids, class_names,
     ax.imshow(masked_image.astype(np.uint8))
     if auto_show:
         plt.show()
+
+    return masked_image.astype(np.uint8)
 
 
 def display_differences(image,
@@ -188,7 +190,7 @@ def display_differences(image,
     boxes = np.concatenate([gt_box, pred_box])
     masks = np.concatenate([gt_mask, pred_mask], axis=-1)
     # Captions per instance show score/IoU
-    captions = ["" for m in gt_match] + ["{:.2f} / {:.2f}".format(
+    captions = [ "" for i in range(len(gt_match))] + ["P: {} \n {:.2f} / {:.2f}".format(class_names[pred_class_id[i]],
         pred_score[i],
         (overlaps[i, int(pred_match[i])]
             if pred_match[i] > -1 else overlaps[i].max()))
@@ -196,13 +198,16 @@ def display_differences(image,
     # Set title if not provided
     title = title or "Ground Truth and Detections\n GT=green, pred=red, captions: score/IoU"
     # Display
-    display_instances(
+    result_img =  display_instances(
         image,
         boxes, masks, class_ids,
         class_names, scores, ax=ax,
         show_bbox=show_box, show_mask=show_mask,
         colors=colors, captions=captions,
         title=title)
+    
+    return result_img
+       
 
 
 def draw_rois(image, rois, refined_rois, mask, class_ids, class_names, limit=10):

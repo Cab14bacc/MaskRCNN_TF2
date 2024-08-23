@@ -5,7 +5,7 @@ import glob
 
 parser = argparse.ArgumentParser(description="Take in VGG annotations in different JSON files in the source directory, and combine them into one JSON file")
 parser.add_argument("-o", "--output", default="annot.json", help="output json filepath and name")
-parser.add_argument("-s", "--source", default="./annot", help="source directory")
+parser.add_argument("-s", "--source", required=True, help="source directory")
 
 args = parser.parse_args()
 

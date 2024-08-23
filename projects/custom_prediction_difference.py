@@ -108,7 +108,7 @@ r = r[0]
 #     # display image with masks and bounding boxes
 #     display_instances(image, bbox, mask, class_ids, train_dataset.class_names)
 
-annot_path = os.path.normpath("C:\Users\leo61\OneDrive\Documents\GitHub\MaskRCNN_TF2\projects\1~60_annot.json")
+annot_path = os.path.normpath("C:/Users/Leo/Documents/GitRepos/MaskRCNN_TF2/projects/1~60_annot.json")
 image_path= os.path.normpath(args.file)
 
 def load_image_data(img_path, annot_path):
@@ -162,5 +162,7 @@ mrcnn.visualize.display_differences(image=image,
                                   pred_box=r['rois'], 
                                   pred_mask=r['masks'], 
                                   pred_class_id=r['class_ids'], 
-                                  class_names=CLASS_NAMES, 
-                                  scores=r['scores'])
+                                  pred_score=r['scores'],
+                                  class_names=CLASS_NAMES )
+
+

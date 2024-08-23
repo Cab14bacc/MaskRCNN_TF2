@@ -29,7 +29,6 @@ import argparse
 
 
 
-
 parser = argparse.ArgumentParser(description="custom object detection")
 parser.add_argument("-f", "--file", required=True, help="target image")
 parser.add_argument("-s", "--source", required=True, help="project folder")
@@ -79,6 +78,7 @@ r = model.detect([image], verbose=0)
 
 # Get the results for the first image.
 r = r[0]
+
 
 # Visualize the detected objects.
 mrcnn.visualize.display_instances(image=image, 
