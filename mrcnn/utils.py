@@ -113,6 +113,7 @@ def compute_overlaps_masks(masks1, masks2):
 
     # intersections and union
     intersections = np.dot(masks1.T, masks2)
+    
     union = area1[:, None] + area2[None, :] - intersections
     overlaps = intersections / union
 
@@ -667,12 +668,15 @@ def compute_matches(gt_boxes, gt_class_ids, gt_masks,
     """
     # Trim zero padding
     # TODO: cleaner to do zero unpadding upstream
+
+    # gt_boxes: [num_instance, (y1, x1, y2, x2, class_id)] in image coordinates.
     gt_boxes = trim_zeros(gt_boxes)
     gt_masks = gt_masks[..., :gt_boxes.shape[0]]
     pred_boxes = trim_zeros(pred_boxes)
     pred_scores = pred_scores[:pred_boxes.shape[0]]
+ 
     # Sort predictions by score from high to low
-    indices = np.argsort(pred_scores)[::-1]
+    indices = np.argsort(pred_scores)[::-1]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
     pred_boxes = pred_boxes[indices]
     pred_class_ids = pred_class_ids[indices]
     pred_scores = pred_scores[indices]
@@ -690,6 +694,8 @@ def compute_matches(gt_boxes, gt_class_ids, gt_masks,
         # 1. Sort matches by score
         sorted_ixs = np.argsort(overlaps[i])[::-1]
         # 2. Remove low scores
+        # np where returns a tuple of arrays, in this case the tuple should only contain 1 array 
+        # TODO: shouldn't iou_threshold be used here
         low_score_idx = np.where(overlaps[i, sorted_ixs] < score_threshold)[0]
         if low_score_idx.size > 0:
             sorted_ixs = sorted_ixs[:low_score_idx[0]]

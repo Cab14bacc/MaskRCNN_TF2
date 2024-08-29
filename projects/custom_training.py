@@ -82,7 +82,11 @@ class CustomDataset(mrcnn.utils.Dataset):
 
             cur_annot = annotation[filename]
             # each dict ("x" : ..., "y" : ...) represent a polygon, "all points x" is a list of x coordinates, 
-            polygons = [{"x" : item["shape_attributes"]["all_points_x"], "y" : item["shape_attributes"]["all_points_y"], "label" : item["region_attributes"]["label"]} for item in cur_annot["regions"].values()]
+            polygons = [{"x" : item["shape_attributes"]["all_points_x"], 
+                         "y" : item["shape_attributes"]["all_points_y"], 
+                         "label" : item["region_attributes"]["label"]} 
+                         for item in cur_annot["regions"].values()]
+            
             self.add_image('dataset', image_id=image_id, path=img_path, width=width, height=height, polygons=polygons)
 
     # Loads the binary masks for an image.
@@ -160,14 +164,16 @@ model.load_weights(filepath=args.pretrained_weight,
                 by_name=True, 
                 exclude=["mrcnn_class_logits", "mrcnn_bbox_fc",  "mrcnn_bbox", "mrcnn_mask"])
 
+num_of_epochs = 50
+
 # finetune all layers 
 model.train(train_dataset=train_dataset, 
             val_dataset=validation_dataset, 
             learning_rate=custom_config.LEARNING_RATE, 
-            epochs=100, 
+            epochs=num_of_epochs, 
             layers='all')
 
 output_weights_path = os.path.join(DATASET_DIR, "output_weights")
-output_weight_name = os.path.basename(os.path.normpath(DATASET_DIR)) + "_" +  datetime.now().strftime("%Y-%m-%d-%H-%M") + ".h5"
+output_weight_name = os.path.basename(os.path.normpath(DATASET_DIR)) + "_" + str(CustomConfig.STEPS_PER_EPOCH) + "_" + str(num_of_epochs) + "_" +datetime.now().strftime("%Y-%m-%d-%H-%M") + ".h5"
 model_path = os.path.normpath(os.path.join(output_weights_path, output_weight_name))
 model.keras_model.save_weights(model_path)

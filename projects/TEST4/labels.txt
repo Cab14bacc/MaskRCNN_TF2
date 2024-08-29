@@ -1,0 +1,13 @@
+CrossWalk
+YellowGrid
+FArrow
+RArrow
+LArrow
+FRArrow
+FLArrow
+LRArrow
+FLRArrow
+Stopline
+ScooterWaitArea
+ScooterWaitTurnArea
+SpeedLimitMarking

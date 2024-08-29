@@ -108,7 +108,7 @@ r = r[0]
 #     # display image with masks and bounding boxes
 #     display_instances(image, bbox, mask, class_ids, train_dataset.class_names)
 
-annot_path = os.path.normpath("C:/Users/Leo/Documents/GitRepos/MaskRCNN_TF2/projects/1~60_annot.json")
+annot_path = os.path.normpath(r"C:\Users\Leo\Documents\GitRepos\MaskRCNN_TF2\projects\TEST3\annot.json")
 image_path= os.path.normpath(args.file)
 
 def load_image_data(img_path, annot_path):
