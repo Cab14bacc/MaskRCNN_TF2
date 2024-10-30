@@ -1,0 +1,1 @@
+training with iaa.someOf((0,1), rotation) augmentation

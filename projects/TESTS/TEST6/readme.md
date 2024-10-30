@@ -1,0 +1,1 @@
+rotation and brightness adjustment

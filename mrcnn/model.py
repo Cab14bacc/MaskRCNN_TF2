@@ -21,7 +21,7 @@ import tensorflow.keras.layers as KL
 import tensorflow.keras.utils as KU
 from tensorflow.python.eager import context
 import tensorflow.keras.models as KM
-
+import cv2
 from mrcnn import utils
 
 # Requires TensorFlow 2.0+
@@ -1263,14 +1263,21 @@ def load_image_gt(dataset, config, image_id, augmentation=None):
         # Make augmenters deterministic to apply similarly to images and masks
         det = augmentation.to_deterministic()
         image = det.augment_image(image)
+        
+        mask = np.transpose(mask, (2, 0, 1))
+
         # Change mask to np.uint8 because imgaug doesn't support np.bool
-        mask = det.augment_image(mask.astype(np.uint8),
-                                 hooks=imgaug.HooksImages(activator=hook))
+        # Augment each mask individually
+        for i in range(mask.shape[0]):
+            mask[i,:,:] = det.augment_image(mask[i,:,:], hooks=imgaug.HooksImages(activator=hook))
+        
+        mask = np.transpose(mask, (1,2,0))
+        
         # Verify that shapes didn't change
         assert image.shape == image_shape, "Augmentation shouldn't change image size"
         assert mask.shape == mask_shape, "Augmentation shouldn't change mask size"
         # Change mask back to bool
-        mask = mask.astype(np.bool)
+        mask = mask.astype(np.bool_)
 
     # Note that some boxes might be all zeros if the corresponding mask got cropped out.
     # and here is to filter them out
@@ -2354,7 +2361,7 @@ class MaskRCNN(object):
         else:
             workers = multiprocessing.cpu_count()
 
-        self.keras_model.fit(
+        history = self.keras_model.fit(
             train_generator,
             initial_epoch=self.epoch,
             epochs=epochs,
@@ -2367,6 +2374,8 @@ class MaskRCNN(object):
             use_multiprocessing=workers > 1,
         )
         self.epoch = max(self.epoch, epochs)
+
+        return history
 
     def mold_inputs(self, images):
         """Takes a list of images and modifies them to the format expected
@@ -2588,6 +2597,7 @@ class MaskRCNN(object):
             })
         return results
 
+
     def get_anchors(self, image_shape):
         """Returns anchor pyramid for the given image size."""
         backbone_shapes = compute_backbone_shapes(self.config, image_shape)
@@ -2709,8 +2719,516 @@ class MaskRCNN(object):
         for k, v in outputs_np.items():
             log(k, v)
         return outputs_np
+    
+    
+    ############################################################
+    #  custom functions: implemented by Cab14bacc
+    ############################################################
+    def square_mode_pre_pad(self, image, min_dim, max_dim, scale):
+        """
+        this scale factor scales each side by that amount, namely each side of the original image portion in the new image will be smaller by a factor of 1 / scale 
+        e.g. scale = 0.5
+
+        Original Image:   New Image:
+         ______          ______ ______
+        |      |        |      |      | 
+        |      |        | ori  |  pad |
+        |______|        |______|______|            
+                        |      |      | 
+                        |  pad |  pad |
+                        |______|______|
 
 
+        Parameters:
+        - image: np.array, the image to be resized
+        - min_dim: int, minimum dimension during resize
+        - max_dim: int, maximum dimension during resize
+        - scale: float, the scale factor to apply. Must be > 1. If scale > 1, cropping (not padding) will be needed, i.e. not the job of this function.
+        - padding: tuple, (top, bottom, left, right). Top and left are always 0.
+        """
+
+        img_shape = image.shape
+        if_height_longer = False
+        # people expect 0.5 scale to scale each side of the actual image portion down to half the original length, 
+        # but the scale used in this code is length of the eventual image / original image length  
+        scale = 1 / scale
+        
+        if img_shape[0] > img_shape[1]:
+            if_height_longer = True
+            long_side = img_shape[0]        
+            short_side = img_shape[1]
+        else:
+            long_side = img_shape[1]
+            short_side = img_shape[0]
+
+        if long_side > max_dim:
+            padding = long_side * (scale - 1)
+        else: #long_side <= max_dim:
+            if short_side < min_dim:
+                short_side_scale = min_dim / short_side
+                new_long_side = long_side * short_side_scale
+                if new_long_side > max_dim:
+                    new_long_side = max_dim
+                    padding = long_side * (scale - 1)
+                elif new_long_side <= max_dim:
+                    padding = (max_dim - new_long_side)/short_side_scale + ((max_dim - new_long_side)/short_side_scale + long_side) * (scale - 1) 
+            else: #short_side >= min_dim:
+                padding = (max_dim - long_side) + max_dim * (scale - 1)
+                
+        
+        if if_height_longer:
+            padding =  (0, int(padding), 0 , 0)
+        else:
+            padding = (0, 0, 0, int(padding))
+        
+        return cv2.copyMakeBorder(image, *padding, cv2.BORDER_CONSTANT, value=[0, 0, 0])
+
+    
+
+    def detect_multi_scale(self, image, start_scale = 0.5, end_scale = 1.5, scale_step = 0.1, verbose=0):
+        """
+        "none" img resize mode: Given input image, scales it multiple sizes, and run predictions on them,   
+        "square" img resize mode: endscale is capped at 1, since by padding, you can only achieve scale down.
+
+        image: input image
+
+        returns a 3d array: [num of images, num_of_detect_per_image]
+        each element is a dictionary same as the output of detect()
+        the dictionary contains:
+            rois: [N, (y1, x1, y2, x2)] detection bounding boxes
+            class_ids: [N] int class IDs
+            scores: [N] float probability scores for the class IDs
+            masks: [H ,W, N] instance binary masks
+            TODO: make masks different from ouput of detect(), returns a python list [N, h, w], where each mask, e.g. masks[i], is the masks within its roi or bounding box
+        """
+        image = np.array(image)
+        assert len(image.shape) == 3
+        height, width , _ = image.shape
+
+        # old_resize_mode = self.config.IMAGE_RESIZE_MODE
+
+        # # force resize mode to none
+        # self.config.IMAGE_RESIZE_MODE = "none"
+        
+        def scale_img(image, scale):
+            h,w = image.shape[:2]
+            new_h = int(((scale * h) // 64) * 64)
+            new_w = int(((scale * w) // 64) * 64)
+            image = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            return image, (new_h, new_w)
+        
+        def unscale_masks(masks, ori_img_shape):
+            output_mask = np.zeros((*ori_img_shape, masks.shape[-1])).astype(np.uint8)
+            masks = masks.astype(np.uint8)
+            height, width = ori_img_shape
+            for i in range(masks.shape[-1]):
+
+                output_mask[:, :, i] = cv2.resize(masks[:,:,i], (width, height), interpolation=cv2.INTER_AREA)
+
+            return output_mask.astype(np.bool_)
+
+        def unscale_rois(rois, ori_shape, new_shape):
+            # (inverse scale for y, inverse scale for x)
+            inverse_scale = (ori_shape[0] / new_shape[0], ori_shape[1] / new_shape[1])
+            for i in range(rois.shape[0]):
+                rois[i] = rois[i] * np.array([*inverse_scale, *inverse_scale])
+
+            return rois.astype(np.int32)
+                
+        if self.config.IMAGE_RESIZE_MODE == "none":
+            if(scale_step != 0):
+                num_of_detect_per_image, remainder = divmod((end_scale - start_scale), scale_step)
+                # make sure at least 1
+                num_of_detect_per_image = int(num_of_detect_per_image) + int((remainder == 0 or num_of_detect_per_image == 0))
+            else:
+                num_of_detect_per_image = 1
+
+            print("num_of_detect_per_image: ", num_of_detect_per_image)
+
+            # scaling
+            scaled_images = []
+            new_shapes = []
+            for i in range(num_of_detect_per_image):
+                cur_scale = end_scale - i * scale_step
+
+                scaled_image, new_shape = scale_img(image, cur_scale)
+                scaled_images.append(scaled_image)
+                new_shapes.append(new_shape)
+            
+            # pred results
+            rois = np.array([]).astype(np.int32)
+            class_ids = np.array([]).astype(np.int32)
+            scores = np.array([]).astype(np.float32)
+            masks = []
+
+            # since different sizes, we only run one image at a time
+            for i, scaled_image in enumerate(scaled_images):
+                print("predicting image of shape: ", new_shapes[i])
+                pred_result = self.detect([scaled_image], verbose=verbose)[0]
+                
+                pred_result["rois"] = unscale_rois(pred_result["rois"], (height, width), new_shapes[i])
+                pred_result["masks"] = unscale_masks(pred_result["masks"], (height, width))
+                masks.extend(utils.minimize_masks_windowed(pred_result["rois"], pred_result["masks"]))
+
+                if rois.size == 0 or class_ids.size == 0 or scores.size == 0:
+                    rois = pred_result["rois"]
+                    class_ids = pred_result["class_ids"]
+                    scores = pred_result["scores"]
+                else:
+                    rois = np.concatenate([rois, pred_result["rois"]], axis = 0)
+                    class_ids = np.concatenate([class_ids, pred_result["class_ids"]], axis = 0)
+                    scores = np.concatenate([scores, pred_result["scores"]], axis = 0)
+
+
+            # self.config.IMAGE_RESIZE_MODE = old_resize_mode
+
+            assert len(rois) == len(class_ids) == len(scores) == len(masks) 
+
+            return {"rois": rois,
+                    "class_ids": class_ids,
+                    "scores": scores,
+                    "masks": masks
+                    }
+        else:
+            height, width , _ = image.shape
+            scaled_images = []
+
+            if(scale_step != 0):
+                num_of_detect_per_image, remainder = divmod((end_scale - start_scale), scale_step)
+                # make sure at least 1
+                num_of_detect_per_image = int(num_of_detect_per_image) + int((remainder == 0 or num_of_detect_per_image == 0))
+            else:
+                num_of_detect_per_image = 1
+
+            print("num_of_detect_per_image: ", num_of_detect_per_image)
+
+            # TODO: square_mode_pre_pad scale logic changed
+            for i in range(num_of_detect_per_image):
+                scaled_images.append(self.square_mode_pre_pad(image, self.config.IMAGE_MIN_DIM, self.config.IMAGE_MAX_DIM, 1.0 - i * scale_step))
+            
+            
+            num_of_batches, num_of_remaining_imgs = divmod(num_of_detect_per_image, self.config.BATCH_SIZE)
+
+
+            scaled_images_batches = [scaled_images[i*self.config.BATCH_SIZE : (i+1)*self.config.BATCH_SIZE] for i in range(num_of_batches)]
+            if num_of_remaining_imgs > 0:
+                scaled_images_batches.append(scaled_images[num_of_batches * self.config.BATCH_SIZE : num_of_batches * self.config.BATCH_SIZE + num_of_remaining_imgs])
+                dummy_img = np.array([[[0]]])
+                scaled_images_batches[-1].extend([dummy_img] * (self.config.BATCH_SIZE - num_of_remaining_imgs))
+            
+            
+            # pred results
+            rois = np.array([]).astype(np.int32)
+            class_ids = np.array([]).astype(np.int32)
+            scores = np.array([]).astype(np.float32)
+            masks = []
+
+
+            for batch in scaled_images_batches:
+                batch_result = self.detect(batch, verbose=0)
+
+                # minimize the masks into windowed form
+                for i in range(len(batch_result)):
+                    # clamp rois when prediction falls out of the original img, this can happen since we implemented scale down by padding before passing the images into the prediction process  
+                    # make bounds broadcast to match shape of batch_result[i]["rois"]
+                    batch_result[i]["rois"] =  np.clip(batch_result[i]["rois"], 0, [[height, width, height, width]])
+                    masks.extend(utils.minimize_masks_windowed(batch_result[i]["rois"], batch_result[i]["masks"]))
+                    
+                    if rois.size == 0 or class_ids.size == 0 or scores.size == 0:
+                        rois = batch_result[i]["rois"]
+                        class_ids = batch_result[i]["class_ids"]
+                        scores = batch_result[i]["scores"]
+                    else:
+                        rois = np.concatenate([rois, batch_result[i]["rois"]], axis = 0)
+                        class_ids = np.concatenate([class_ids, batch_result[i]["class_ids"]], axis = 0)
+                        scores = np.concatenate([scores, batch_result[i]["scores"]], axis = 0)
+            
+
+
+            # remove prediction of dummy images 
+            if num_of_remaining_imgs > 0:
+                rois = rois[:num_of_batches * self.config.BATCH_SIZE + num_of_remaining_imgs]
+                class_ids = class_ids[:num_of_batches * self.config.BATCH_SIZE + num_of_remaining_imgs]
+                scores = scores[:num_of_batches * self.config.BATCH_SIZE + num_of_remaining_imgs]
+                masks = masks[:num_of_batches * self.config.BATCH_SIZE + num_of_remaining_imgs]
+
+            assert len(rois) == len(class_ids) == len(scores) == len(masks)
+
+            return {
+                    "rois": rois,
+                    "class_ids": class_ids,
+                    "scores": scores,
+                    "masks": masks
+                    }
+    
+    def crop_masks(self, masks, window):
+        """
+        masks = [H, W, N]
+        window: (y1, x1, y2, x2)
+        """
+        return masks[ window[0] : window[2], window[1] : window[3], :]
+
+    def combine_detections(self, detection_outputs, overlap_threshold = 0.4):
+        """
+        given an array of dictionaries in the same format as the output of the detect() function, 
+        this function amalgamates the masks by calculating the overlaps between masks, and simply add the currenly valid masks with the least amount of overlaps, and mark it as invalid
+        invalid masks also occurs from a mask overlapped with a selected mask  
+        this function is created to be used after detect_multi_scale(), since it returns prediction results ran on diff scales of the same image 
+
+        this function expects masks of the same size
+        for an array of masks that had used pad_given_scale() will need to use crop_masks() beforehand
+
+        detection_outputs: a list of dicts, one dict per image.
+            rois: [N, (y1, x1, y2, x2)] detection bounding boxes
+            class_ids: [N] int class IDs
+            scores: [N] float probability scores for the class IDs
+            masks: [H, W, N] instance binary masks
+        
+        """
+        assert len(detection_outputs) > 0
+
+        if len(detection_outputs) <= 1:
+            print("detection_outputs requires length > 1 for combination")
+            return None
+
+        # combine pred results
+        rois = []
+        class_ids = []
+        scores = []
+        masks = []
+        h, w, n = detection_outputs[0]["masks"].shape
+
+        for output in detection_outputs: 
+            rois.extend(output["rois"])
+            class_ids.extend(output["class_ids"])
+            scores.extend(output["scores"])
+            output["masks"] = np.transpose(output["masks"], (2, 0, 1))
+            masks.extend([output["masks"][i][output["rois"][i][0]: output["rois"][i][2], output["rois"][i][1]: output["rois"][i][3] ] for i in range(output["masks"].shape[0])])
+
+
+        # overlaps[i, j] returns IOU of the ith and jth mask 
+        overlaps = utils.compute_overlaps_masks(masks, masks, rois, rois, ifWindowed=True)
+
+        overlaps = overlaps > overlap_threshold
+        num_overlaps = np.sum(overlaps, axis=0)
+        # argsort returns indices in ascending order, we reverse it so that the first idx is the mask with the least overlaps
+        meta_array = list(zip(scores, num_overlaps))
+        dt = np.dtype([('score', float), ('num of overlaps', int)])
+        meta_array = np.array(meta_array, dtype=dt)
+        num_overlaps_sorted_idx = np.argsort(meta_array, order=['score', 'num of overlaps'])[::-1]
+
+        output_masks_ids = []        
+        invalid_mask_ids = set()
+
+        for idx in num_overlaps_sorted_idx:
+            if idx in invalid_mask_ids:
+                continue
+
+            invalid_mask_ids.add(idx)
+            output_masks_ids.append(idx)
+
+            for i in range(len(num_overlaps)):
+                # can ignore duplicates, duplicate entries doesn't matter 
+                if i != idx and overlaps[idx][i] == True:
+                    invalid_mask_ids.add(i)
+
+        rois = np.array(rois)[output_masks_ids]
+        class_ids =  np.array(class_ids)[output_masks_ids]
+        scores =  np.array(scores)[output_masks_ids]
+
+        output_masks = np.zeros((h,w,len(output_masks_ids)))
+        for i, idx in enumerate(output_masks_ids):
+            y1, x1, y2, x2 = rois[i]
+            output_masks[y1:y2, x1:x2, i] = masks[idx]
+
+        
+        return {"rois": rois,
+                "class_ids": class_ids,
+                "scores": scores,
+                "masks": output_masks}
+
+    def detect_multi_scale_and_combine(self, image, step = 0.1, num_of_detect_per_image = 15, overlap_threshold = 0.4, verbose=0):
+        """
+        same as detect() but runs mulitple detections for a single image, using a different scale with each detection. (only scales down) 
+        the scale here is achieved through padding before molding, we assume detection is always run in "square" mode. 
+
+        combines the results into a single prediction result after  
+
+        image: input image
+
+        returns a 3d array: [num of images, num_of_detect_per_image]
+        each element is a dictionary same as the output of detect()
+        the dictionary contains:
+            rois: [N, (y1, x1, y2, x2)] detection bounding boxes
+            class_ids: [N] int class IDs
+            scores: [N] float probability scores for the class IDs
+            masks: [H ,W, N] instance binary masks
+            TODO: make masks different from ouput of detect(), returns a python list [N, h, w], where each mask, e.g. masks[i], is the masks within its roi or bounding box
+        """
+        image = np.array(image)
+        assert len(image.shape) == 3
+        
+        height, width , _ = image.shape
+        scaled_images = []
+        # TODO: square_mode_pre_pad scale logic changed
+        for i in range(num_of_detect_per_image):
+            scaled_images.append(self.square_mode_pre_pad(image, self.config.IMAGE_MIN_DIM, self.config.IMAGE_MAX_DIM, 1.0 + i * step))
+        
+        
+        num_of_batches, num_of_remaining_imgs = divmod(num_of_detect_per_image, self.config.BATCH_SIZE)
+
+
+        scaled_images_batches = [scaled_images[i*self.config.BATCH_SIZE : (i+1)*self.config.BATCH_SIZE] for i in range(num_of_batches)]
+        if num_of_remaining_imgs > 0:
+            scaled_images_batches.append(scaled_images[num_of_batches * self.config.BATCH_SIZE : num_of_batches * self.config.BATCH_SIZE + num_of_remaining_imgs])
+            dummy_img = np.array([[[0]]])
+            scaled_images_batches[-1].extend([dummy_img] * (self.config.BATCH_SIZE - num_of_remaining_imgs))
+        
+        
+        # pred results
+        rois = []
+        class_ids = []
+        scores = []
+        masks = []
+
+        for batch in scaled_images_batches:
+            batch_result = self.detect(batch, verbose=0)
+
+          
+
+            # minimize the masks into windowed form
+            for i in range(len(batch_result)):
+                # clamp rois when prediction falls out of the original img, this can happen since we implemented scale down by padding before passing the images into the prediction process  
+                # make bounds broadcast to match shape of batch_result[i]["rois"]
+                batch_result[i]["rois"] =  np.clip(batch_result[i]["rois"], 0, [[height, width, height, width]])
+                masks.extend(utils.minimize_masks_windowed(batch_result[i]["rois"], batch_result[i]["masks"]))
+
+                rois.extend(batch_result[i]["rois"].tolist())
+                class_ids.extend(batch_result[i]["class_ids"].tolist())
+                scores.extend(batch_result[i]["scores"].tolist())
+
+
+        # remove prediction of dummy images 
+        if num_of_remaining_imgs > 0:
+            rois = rois[:num_of_batches * self.config.BATCH_SIZE + num_of_remaining_imgs]
+            class_ids = class_ids[:num_of_batches * self.config.BATCH_SIZE + num_of_remaining_imgs]
+            scores = scores[:num_of_batches * self.config.BATCH_SIZE + num_of_remaining_imgs]
+            masks = masks[:num_of_batches * self.config.BATCH_SIZE + num_of_remaining_imgs]
+
+        assert len(rois) == len(class_ids) == len(scores) == len(masks) 
+
+        if len(rois) <= 1:
+            print("result requires length > 1 for combination")
+            return None
+
+        # combine pred results
+        # Calculate overlaps and sort indices
+        overlaps = utils.compute_overlaps_masks(masks, masks, rois, rois, ifWindowed=True)
+        overlaps = overlaps > overlap_threshold
+        num_overlaps = np.sum(overlaps, axis=0)
+
+        # argsort returns indices in ascending order, we reverse it so that the first idx is the mask with the least overlaps
+        meta_array = list(zip(scores, num_overlaps))
+        dt = np.dtype([('score', float), ('num of overlaps', int)])
+        meta_array = np.array(meta_array, dtype=dt)
+        num_overlaps_sorted_idx = np.argsort(meta_array, order=['score', 'num of overlaps'])[::-1]
+
+        output_masks_ids = []        
+        invalid_mask_ids = set()
+
+        for idx in num_overlaps_sorted_idx:
+            if idx in invalid_mask_ids:
+                continue
+
+            invalid_mask_ids.add(idx)
+            output_masks_ids.append(idx)
+            
+            # if overlapped
+            for i in range(len(num_overlaps)):
+                # can ignore duplicates, duplicate entries doesn't matter 
+                if i != idx and overlaps[idx][i] == True:
+                    invalid_mask_ids.add(i)
+
+        rois = np.array(rois).astype(np.int32)
+        rois = rois[output_masks_ids]
+
+        class_ids =  np.array(class_ids).astype(np.int32)
+        class_ids = class_ids[output_masks_ids]
+        scores =  np.array(scores).astype(np.float32)
+        scores = scores[output_masks_ids]
+        masks = [masks[idx] for idx in output_masks_ids]
+
+
+        # expand the mask into its original shape
+        masks = utils.expand_masks_windowed(rois, masks, (height, width))
+        # output_masks = utils.expand_mask_window(rois, [masks[idx] for idx in output_masks_ids], (height, width))
+
+        return {"rois": rois,
+                "class_ids": class_ids,
+                "scores": scores,
+                "masks": masks}
+        
+    def detect_multi_scale_and_combine_windowed(self, image, start_scale = 0.5, end_scale = 1.5, scale_step = 0.1, overlap_threshold = 0.4, verbose=0):
+        """
+        combines the results into a single prediction result, selects highest score from overlapping masks. 
+
+        image: input image
+
+        returns a 3d array: [num of images, num_of_detect_per_image]
+        each element is a dictionary same as the output of detect()
+        the dictionary contains:
+            rois: [N, (y1, x1, y2, x2)] detection bounding boxes
+            class_ids: [N] int class IDs
+            scores: [N] float probability scores for the class IDs
+            masks: [N, H ,W], python list of np arrays, instance binary windowed masks
+        """
+
+        pred_result = self.detect_multi_scale(image, start_scale = start_scale, end_scale = end_scale, scale_step = scale_step, verbose=verbose)
+        
+        # assert len(pred_result["rois"]) <= 1, "result requires length > 1 for combination"
+     
+
+        # combine pred results
+        # Calculate overlaps and sort indices
+        overlaps = utils.compute_overlaps_masks(pred_result["masks"], pred_result["masks"], pred_result["rois"], pred_result["rois"], ifWindowed=True)
+        overlaps = overlaps > overlap_threshold
+        num_overlaps = np.sum(overlaps, axis=0)
+
+        # argsort returns indices in ascending order, we reverse it so that the first idx is the mask with the least overlaps
+        meta_array = list(zip(pred_result["scores"], num_overlaps))
+        dt = np.dtype([('score', float), ('num of overlaps', int)])
+        meta_array = np.array(meta_array, dtype=dt)
+        num_overlaps_sorted_idx = np.argsort(meta_array, order=['score', 'num of overlaps'])[::-1]
+
+        output_masks_ids = []        
+        invalid_mask_ids = set()
+
+        for idx in num_overlaps_sorted_idx:
+            if idx in invalid_mask_ids:
+                continue
+
+            invalid_mask_ids.add(idx)
+            output_masks_ids.append(idx)
+            
+            # if overlapped
+            for i in range(len(num_overlaps)):
+                # can ignore duplicates, duplicate entries doesn't matter 
+                if i != idx and overlaps[idx][i] == True:
+                    invalid_mask_ids.add(i)
+
+        pred_result["rois"] = np.array(pred_result["rois"]).astype(np.int32)
+        pred_result["rois"] = pred_result["rois"][output_masks_ids]
+
+        pred_result["class_ids"] =  np.array(pred_result["class_ids"]).astype(np.int32)
+        pred_result["class_ids"] = pred_result["class_ids"][output_masks_ids]
+
+        pred_result["scores"] =  np.array(pred_result["scores"]).astype(np.float32)
+        pred_result["scores"] = pred_result["scores"][output_masks_ids]
+
+        pred_result["masks"] = [pred_result["masks"][idx] for idx in output_masks_ids]
+
+        return pred_result
+        
 ############################################################
 #  Data Formatting
 ############################################################
@@ -2739,7 +3257,6 @@ def compose_image_meta(image_id, original_image_shape, image_shape,
     )
     return meta
 
-
 def parse_image_meta(meta):
     """Parses an array that contains image attributes to its components.
     See compose_image_meta() for more details.
@@ -2762,7 +3279,6 @@ def parse_image_meta(meta):
         "scale": scale.astype(np.float32),
         "active_class_ids": active_class_ids.astype(np.int32),
     }
-
 
 def parse_image_meta_graph(meta):
     """Parses a tensor that contains image attributes to its components.
@@ -2787,14 +3303,12 @@ def parse_image_meta_graph(meta):
         "active_class_ids": active_class_ids,
     }
 
-
 def mold_image(images, config):
     """Expects an RGB image (or array of images) and subtracts
     the mean pixel and converts it to float. Expects image
     colors in RGB order.
     """
     return images.astype(np.float32) - config.MEAN_PIXEL
-
 
 def unmold_image(normalized_images, config):
     """Takes a image normalized with mold() and returns the original."""
@@ -2816,7 +3330,6 @@ def trim_zeros_graph(boxes, name='trim_zeros'):
     boxes = tf.boolean_mask(tensor=boxes, mask=non_zeros, name=name)
     return boxes, non_zeros
 
-
 def batch_pack_graph(x, counts, num_rows):
     """Picks different number of values from each row
     in x depending on the values in counts.
@@ -2825,7 +3338,6 @@ def batch_pack_graph(x, counts, num_rows):
     for i in range(num_rows):
         outputs.append(x[i, :counts[i]])
     return tf.concat(outputs, axis=0)
-
 
 def norm_boxes_graph(boxes, shape):
     """Converts boxes from pixel coordinates to normalized coordinates.
@@ -2842,7 +3354,6 @@ def norm_boxes_graph(boxes, shape):
     scale = tf.concat([h, w, h, w], axis=-1) - tf.constant(1.0)
     shift = tf.constant([0., 0., 1., 1.])
     return tf.divide(boxes - shift, scale)
-
 
 def denorm_boxes_graph(boxes, shape):
     """Converts boxes from normalized coordinates to pixel coordinates.

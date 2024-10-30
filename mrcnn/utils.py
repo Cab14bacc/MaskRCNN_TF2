@@ -21,6 +21,7 @@ import skimage.transform
 import urllib.request
 import shutil
 import warnings
+import cv2
 from distutils.version import LooseVersion
 
 # URL from which to download the latest COCO trained weights
@@ -54,8 +55,45 @@ def extract_bboxes(mask):
             # resizing or cropping. Set bbox to zeros
             x1, x2, y1, y2 = 0, 0, 0, 0
         boxes[i] = np.array([y1, x1, y2, x2])
+
     return boxes.astype(np.int32)
 
+def extract_min_area_bboxes(mask):
+    """Compute minimum bounding boxes from masks.
+    mask: [height, width, num_instances]. Mask pixels are either 1 or 0.
+
+    Returns: [num_instances, ([y1, y2, y3, y4], [x1, x2, x3, x4])]
+    """
+    boxes = np.zeros([mask.shape[-1], 2, 4], dtype=np.int32)
+
+    for i in range(mask.shape[-1]):
+        m = mask[:, :, i]
+        # Bounding box.
+
+        contours, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if contours:
+            # Get the largest contour
+            largest_cnt = max(contours, key=cv2.contourArea)
+            rect = cv2.minAreaRect(largest_cnt)
+            # returns  [[x1, y1],
+            #           [x2, y2],
+            #           [x3, y3],
+            #           [x4, y4]]
+
+            box = cv2.boxPoints(rect)
+            box = np.array(box)
+            
+            box = box[..., None]
+            box = np.concatenate(box, axis = 1)
+            box = box[[1,0]]
+  
+            # Clip the coordinates to be within the image dimensions
+            box[0] = np.clip(box[0], 0, m.shape[0] - 1) 
+            box[1] = np.clip(box[1], 0, m.shape[1] - 1) 
+
+            boxes[i] = box.astype(np.int32)
+        
+    return boxes.astype(np.int32)
 
 def compute_iou(box, boxes, box_area, boxes_area):
     """Calculates IoU of the given box with the array of the given boxes.
@@ -97,27 +135,68 @@ def compute_overlaps(boxes1, boxes2):
     return overlaps
 
 
-def compute_overlaps_masks(masks1, masks2):
+def compute_overlaps_masks(masks1, masks2, boxes1 = None, boxes2 = None, ifWindowed = False):
     """Computes IoU overlaps between two sets of masks.
     masks1, masks2: [Height, Width, instances]
+
+
+    ==============================windowed mask mode===================================
+     Computes IoU overlaps between two sets of masks. 
+    This attempts to reduce extra memory usage owing to sparse masks
+    
+    TODO: check correctness
+
+    masks1, masks2: [instances, Height, Width], a list of masks of varying size, but the original expanded mask should be the same size, each instance contains only the mask within the bounding box
+    boxes1, boxes2: [N, (y1, x1, y2, x2)].
     """
-    
-    # If either set of masks is empty return empty result
-    if masks1.shape[-1] == 0 or masks2.shape[-1] == 0:
-        return np.zeros((masks1.shape[-1], masks2.shape[-1]))
-    # flatten masks and compute their areas
-    masks1 = np.reshape(masks1 > .5, (-1, masks1.shape[-1])).astype(np.float32)
-    masks2 = np.reshape(masks2 > .5, (-1, masks2.shape[-1])).astype(np.float32)
-    area1 = np.sum(masks1, axis=0)
-    area2 = np.sum(masks2, axis=0)
+    if (ifWindowed == False):
+        # If either set of masks is empty return empty result
+        if masks1.shape[-1] == 0 or masks2.shape[-1] == 0:
+            return np.zeros((masks1.shape[-1], masks2.shape[-1]))
+        # flatten masks and compute their areas
+        masks1 = np.reshape(masks1 > .5, (-1, masks1.shape[-1])).astype(np.float32)
+        masks2 = np.reshape(masks2 > .5, (-1, masks2.shape[-1])).astype(np.float32)
+        area1 = np.sum(masks1, axis=0)
+        area2 = np.sum(masks2, axis=0)
 
-    # intersections and union
-    intersections = np.dot(masks1.T, masks2)
-    
-    union = area1[:, None] + area2[None, :] - intersections
-    overlaps = intersections / union
+        # intersections and union
+        intersections = np.dot(masks1.T, masks2)
+        
+        union = area1[:, None] + area2[None, :] - intersections
+        overlaps = intersections / union
 
-    return overlaps
+        return overlaps
+    else:
+        assert boxes1 is not None and boxes2 is not None
+
+        if len(masks1) == 0 or len(masks2) == 0:
+            return np.zeros((len(masks1), len(masks2)))
+    
+        area1 = np.array([np.sum(mask > 0.5) for mask in masks1]).astype(np.float32)
+        area2 = np.array([np.sum(mask > 0.5) for mask in masks2]).astype(np.float32)
+
+        intersections = np.zeros((len(boxes1), len(boxes2))).astype(np.float32)
+        
+        for mask1 , box1, idx1 in zip(masks1, boxes1, range(len(boxes1))):
+            for mask2 , box2, idx2 in zip(masks2, boxes2, range(len(boxes2))):
+                # calculate intersection box
+                y1 = np.maximum(box1[0], box2[0])
+                y2 = np.minimum(box1[2], box2[2])
+                x1 = np.maximum(box1[1], box2[1])
+                x2 = np.minimum(box1[3], box2[3])
+                if ((y2 - y1) <= 0 or (x2 - x1) <= 0):
+                    intersections[idx1][idx2] = 0
+                else:
+                    # AND the masks together, than sum the intersection
+                    intersections[idx1][idx2] = np.sum(
+                                                        np.all(np.array([mask1[(y1 - box1[0]) : (y2 - box1[0]), (x1 - box1[1]) : (x2 - box1[1])], mask2[(y1 - box2[0]) : (y2 - box2[0]), (x1 - box2[1]) : (x2 - box2[1])]]), axis = 0)
+                                                    )
+                
+        union = area1[:, None] + area2[None, :] - intersections 
+        overlaps = intersections / union
+        # if somehow perfectly overlap
+        overlaps = np.nan_to_num(overlaps)      
+        return overlaps
 
 
 def non_max_suppression(boxes, scores, threshold):
@@ -437,6 +516,7 @@ def resize_image(image, min_dim=None, max_dim=None, min_scale=None, mode="square
     if min_scale and scale < min_scale:
         scale = min_scale
 
+
     # Does it exceed max dim?
     if max_dim and mode == "square":
         image_max = max(h, w)
@@ -553,6 +633,41 @@ def expand_mask(bbox, mini_mask, image_shape):
     return mask
 
 
+def minimize_masks_windowed(bboxes, masks):
+    """
+    crop mask to contain only the mask within the window, returns a python list of np.array mask of different sizes
+
+    See inspect_data.ipynb notebook for more details.
+    """
+    assert len(masks.shape) == 3
+
+    output_mask = []
+    for i in range(masks.shape[-1]):
+        # Pick slice and cast to bool in case load_mask() returned wrong dtype
+        m = masks[:, :, i]
+        y1, x1, y2, x2 = bboxes[i]
+        m = m[y1:y2, x1:x2]
+        if m.size == 0:
+            raise Exception("Invalid bounding box with area of zero")
+        output_mask.append(m.astype(np.bool_))
+    return output_mask
+
+
+def expand_masks_windowed(bboxes, windowed_masks, image_shape):
+    """Resizes mini masks back to image size. Reverses the change
+    of minimize_windowed_masks().
+
+    """
+    h, w = image_shape
+    output_masks = np.zeros((h, w, len(windowed_masks)), dtype="bool_")
+    for i in range(len(windowed_masks)):
+
+        # clipped if prediction falls out of the image itself, possible since we added padding to 
+        y1, x1, y2, x2 = bboxes[i]
+        output_masks[y1:y2, x1:x2, i] = windowed_masks[i]
+    return output_masks
+
+
 # TODO: Build and use this function to reduce code duplication
 def mold_mask(mask, config):
     pass
@@ -575,7 +690,6 @@ def unmold_mask(mask, bbox, image_shape):
     full_mask = np.zeros(image_shape[:2], dtype=np.bool)
     full_mask[y1:y2, x1:x2] = mask
     return full_mask
-
 
 ############################################################
 #  Anchors
@@ -656,7 +770,7 @@ def trim_zeros(x):
 
 def compute_matches(gt_boxes, gt_class_ids, gt_masks,
                     pred_boxes, pred_class_ids, pred_scores, pred_masks,
-                    iou_threshold=0.5, score_threshold=0.0):
+                    iou_threshold=0.5, score_threshold=0.0, ifWindowed = False):
     """Finds matches between prediction and ground truth instances.
 
     Returns:
@@ -665,6 +779,8 @@ def compute_matches(gt_boxes, gt_class_ids, gt_masks,
         pred_match: 1-D array. For each predicted box, it has the index of
                     the matched ground truth box.
         overlaps: [pred_boxes, gt_boxes] IoU overlaps.
+        
+        pred_scores: 1D array, this is interpreted as threshold
     """
     # Trim zero padding
     # TODO: cleaner to do zero unpadding upstream
@@ -680,10 +796,15 @@ def compute_matches(gt_boxes, gt_class_ids, gt_masks,
     pred_boxes = pred_boxes[indices]
     pred_class_ids = pred_class_ids[indices]
     pred_scores = pred_scores[indices]
-    pred_masks = pred_masks[..., indices]
 
-    # Compute IoU overlaps [pred_masks, gt_masks]
-    overlaps = compute_overlaps_masks(pred_masks, gt_masks)
+    if (ifWindowed):
+        pred_masks = [pred_masks[idx] for idx in indices]
+        gt_masks = minimize_masks_windowed(gt_boxes, gt_masks)
+        overlaps = compute_overlaps_masks(pred_masks, gt_masks, pred_boxes, gt_boxes, ifWindowed=True)
+    else:
+        pred_masks = pred_masks[..., indices]
+        # Compute IoU overlaps [pred_masks, gt_masks]
+        overlaps = compute_overlaps_masks(pred_masks, gt_masks)
 
     # Loop through predictions and find matching ground truth boxes
     match_count = 0
@@ -714,47 +835,139 @@ def compute_matches(gt_boxes, gt_class_ids, gt_masks,
                 gt_match[j] = i
                 pred_match[i] = j
                 break
+    
+    # pred_scores is interpreted as thresholds
+    return gt_match, pred_match, overlaps, pred_scores
 
-    return gt_match, pred_match, overlaps
+# returns gt pred pairs where the iou is above a certain threshold, used for later analysis
+def compute_gt_pred_pairs(class_names , gt_boxes, gt_class_ids, gt_masks,
+                        pred_boxes, pred_class_ids, pred_scores, pred_masks,
+                        iou_threshold=0.3, score_threshold=0.0, ifWindowed= False):
+    
+    """Finds matches between prediction and ground truth instances.
+        if ifWindowed is True, then treat pred_masks as a python list of windowed masks
+
+    Returns:
+        result: a array of rows of gt pred pairs (gt, pred, pred score, IfMatched) 
+    """
+    # Trim zero padding
+    # TODO: cleaner to do zero unpadding upstream
+
+    # gt_boxes: [num_instance, (y1, x1, y2, x2, class_id)] in image coordinates.
+    gt_boxes = trim_zeros(gt_boxes)
+    gt_masks = gt_masks[..., :gt_boxes.shape[0]]
+    gt_class_ids = gt_class_ids[:gt_boxes.shape[0]]
+
+    pred_boxes = trim_zeros(pred_boxes)
+    pred_scores = pred_scores[:pred_boxes.shape[0]]
+    pred_class_ids = pred_class_ids[:pred_boxes.shape[0]]
+ 
+    # Sort predictions by score from high to low
+    indices = np.argsort(pred_scores)[::-1]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
+    pred_boxes = pred_boxes[indices]
+    pred_class_ids = pred_class_ids[indices]
+    pred_scores = pred_scores[indices]
+    if (ifWindowed):
+        pred_masks = [pred_masks[idx] for idx in indices]
+        gt_masks = minimize_masks_windowed(gt_boxes, gt_masks)
+
+        # Compute IoU overlaps [pred_masks, gt_masks]
+        # overlaps[i, j] will return the IoU between the ith pred_mask and the jth gt_mask
+        overlaps = compute_overlaps_masks(pred_masks, gt_masks, pred_boxes, gt_boxes, ifWindowed=True)
+
+        # edge cases where no overlaps, either pred and no overlapping gt, or gt and no overlapping pred
+        pred_ixs_no_overlap_gt = np.where(np.all(overlaps < iou_threshold, axis=1))[0]
+        gt_ixs_no_overlap_pred = np.where(np.all(overlaps < iou_threshold, axis=0))[0]
+    else:
+        pred_masks = pred_masks[..., indices]
+        print(gt_masks.shape)
+        print(pred_masks.shape)
+
+        # Compute IoU overlaps [pred_masks, gt_masks]
+        # overlaps[i, j] will return the IoU between the ith pred_mask and the jth gt_mask
+        overlaps = compute_overlaps_masks(pred_masks, gt_masks)
+
+        # edge cases where no overlaps, either pred and no overlapping gt, or gt and no overlapping pred
+        pred_ixs_no_overlap_gt = np.where(np.all(overlaps < iou_threshold, axis=1))[0]
+        gt_ixs_no_overlap_pred = np.where(np.all(overlaps < iou_threshold, axis=0))[0]
+
+    result = []
+
+    # the ending 0 and 1 indicate matched(1) pairs or not(0)
+
+    for idx in pred_ixs_no_overlap_gt:
+        # print(f" {'None':<20} || { class_names[pred_class_ids[idx]]:<20} || {'None':<20} || 0")
+        result.append(["None", class_names[pred_class_ids[idx]], "None", "0"])
+
+    for idx in gt_ixs_no_overlap_pred:
+        # print(f" {class_names[gt_class_ids[idx]]:<20} || {'None':<20}|| {'None':<20} || 0")
+        result.append([class_names[gt_class_ids[idx]], "None", "None", "0"])
+
+    for i in range(len(pred_boxes)):
+        # Find best matching ground truth box
+        # 1. Sort matches by score
+        sorted_ixs = np.argsort(overlaps[i])[::-1]
+        # 2. Remove low iou
+        low_iou_idx = np.where(overlaps[i, sorted_ixs] < iou_threshold)[0]
+        if low_iou_idx.size > 0:
+            sorted_ixs = sorted_ixs[:low_iou_idx[0]]
+        # 3. Find the match
+        for j in sorted_ixs:
+            if  class_names[pred_class_ids[i]] ==  class_names[gt_class_ids[j]]:
+                # print(f" {class_names[gt_class_ids[j]]:<20} || { class_names[pred_class_ids[i]]:<20} || {pred_scores[i]:<20.3f}" || "1")
+                result.append([class_names[gt_class_ids[j]], class_names[pred_class_ids[i]], pred_scores[i], "1"])
+            else:
+                # print(f" {class_names[gt_class_ids[j]]:<20} || { class_names[pred_class_ids[i]]:<20} || {pred_scores[i]:<20.3f} || 0")
+                result.append([class_names[gt_class_ids[j]], class_names[pred_class_ids[i]], pred_scores[i], "0"])
+
+    return result
 
 
 def compute_ap(gt_boxes, gt_class_ids, gt_masks,
                pred_boxes, pred_class_ids, pred_scores, pred_masks,
-               iou_threshold=0.5):
+               iou_threshold=0.5, ifWindowed = False):
     """Compute Average Precision at a set IoU threshold (default 0.5).
+
+        see this: https://medium.com/lifes-a-struggle/mean-average-precision-map-%E8%A9%95%E4%BC%B0%E7%89%A9%E9%AB%94%E5%81%B5%E6%B8%AC%E6%A8%A1%E5%9E%8B%E5%A5%BD%E5%A3%9E%E7%9A%84%E6%8C%87%E6%A8%99-70a2d2872eb0
+        to understand this function
+
+        if ifWindowed is True, then treat pred_masks as a python list of windowed masks
 
     Returns:
     mAP: Mean Average Precision
     precisions: List of precisions at different class score thresholds.
-    recalls: List of recall values at different class score thresholds.
+    recalls: List of recall values at different class score thresholds. 
     overlaps: [pred_boxes, gt_boxes] IoU overlaps.
     """
     # Get matches and overlaps
-    gt_match, pred_match, overlaps = compute_matches(
+    gt_match, pred_match, overlaps, thresholds = compute_matches(
         gt_boxes, gt_class_ids, gt_masks,
         pred_boxes, pred_class_ids, pred_scores, pred_masks,
-        iou_threshold)
+        iou_threshold, ifWindowed=ifWindowed)
 
     # Compute precision and recall at each prediction box step
     precisions = np.cumsum(pred_match > -1) / (np.arange(len(pred_match)) + 1)
     recalls = np.cumsum(pred_match > -1).astype(np.float32) / len(gt_match)
 
     # Pad with start and end values to simplify the math
+    # to compute area under the curve??????????
     precisions = np.concatenate([[0], precisions, [0]])
     recalls = np.concatenate([[0], recalls, [1]])
 
     # Ensure precision values decrease but don't increase. This way, the
     # precision value at each recall threshold is the maximum it can be
     # for all following recall thresholds, as specified by the VOC paper.
+    # since you if precision value increase as recall increases, then there is no real reason why you would choose a lower precision rate with a lower recall rate
     for i in range(len(precisions) - 2, -1, -1):
         precisions[i] = np.maximum(precisions[i], precisions[i + 1])
 
     # Compute mean AP over recall range
+    # compute area under the curve, the max area is 1, where precision is 1 for all recall rates
     indices = np.where(recalls[:-1] != recalls[1:])[0] + 1
     mAP = np.sum((recalls[indices] - recalls[indices - 1]) *
                  precisions[indices])
 
-    return mAP, precisions, recalls, overlaps
+    return mAP, precisions[1 : -1], recalls[1 : -1], overlaps, thresholds
 
 
 def compute_ap_range(gt_box, gt_class_id, gt_mask,
@@ -797,6 +1010,8 @@ def compute_recall(pred_boxes, gt_boxes, iou):
 
     recall = len(set(matched_gt_boxes)) / gt_boxes.shape[0]
     return recall, positive_ids
+
+
 
 
 # ## Batch Slicing

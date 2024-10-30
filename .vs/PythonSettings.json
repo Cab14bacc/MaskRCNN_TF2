@@ -1,0 +1,4 @@
+{
+  "Interpreter": "CondaEnv|CondaEnv|MaskRcnnTF2",
+  "SuppressEnvironmentCreationPrompt": true
+}
