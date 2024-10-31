@@ -32,6 +32,7 @@ parser.add_argument("-ss", "--save-stats", default="True", help="save pred stats
 parser.add_argument("-scs", "--save-combined-stats", default="True", help="save combined pred stats")
 parser.add_argument("-sp", "--save-plots", default="True", help="save plots")
 parser.add_argument("-ssa", "--save-segment-anything", default="True", help="save segment anything result based on prediction masks")
+parser.add_argument("-uep", "--use-existing-prediction", default="False", help="use existing pred_output.json instead of running pred again")
 
 # TODO: if not save pred, then read from csv
 
@@ -44,12 +45,15 @@ args.save_stats = True if args.save_stats == "True" else False
 args.save_combined_stats = True if args.save_combined_stats == "True" else False
 args.save_plots = True if args.save_plots == "True" else False
 args.save_segment_anything = True if args.save_segment_anything == "True" else False
+args.use_existing_prediction = True if args.use_existing_prediction == "True" else False
+
 
 print("settings: ", args.save_visualization, args.save_stats, args.save_combined_stats, args.save_plots, args.save_segment_anything)
 
 # Load class names
 CLASS_NAMES = ['BG']
-SUBFOLDERS = [ "詹老師jpg", "世曦", "Google", "詹老師tif"]
+# SUBFOLDERS = [ "詹老師jpg", "世曦", "Google", "詹老師tif"]
+SUBFOLDERS = [ "Google"]
 # image names of the intersections, no file extension
 # IMG_NAMES = ["0001","0002","0003","0004","0005","0006","0007","0008","0009","0010","0011","0012","0013","0014","0015"]
 IMG_NAMES = ["0001","0002","0003","0004","0005"]
@@ -85,7 +89,7 @@ class CustomConfig(mrcnn.config.Config):
 
     DETECTION_MIN_CONFIDENCE = 0.3
 
-    IMAGE_RESIZE_MODE = "none"
+    # IMAGE_RESIZE_MODE = "none"
 
 def format_name_to_annot_key(input, format_tuple):
     regex_str, format_str = format_tuple
@@ -149,13 +153,14 @@ ANNOT_PARENT_PATH = os.path.normpath(args.annot)
 fields = ["Img", "GT", "Pred", "Score", "IfValid"]
 
 
-def scale_combine_pred(imgs_dir, config, annot_path, vis_output_dir):
+def scale_combine_pred(imgs_dir, config, annot_path, vis_output_dir, pred_result_output_dir):
     """
     Return:
         result: [num of images, num_of_gt_pred_pairs, ("Img", "GT", "Pred", "Score", "IfValid")], rows of gt pred pair.
         img_idx_order: [num of images], records the id of the current image, so as to know which intersection this image contains
         num_of_gts: [num of images, num of class types], output the number of gt of the class type of that image
     """
+
     result = []
     img_idx_order = []
     total_gt_match = np.array([]).astype(np.int32)
@@ -165,6 +170,7 @@ def scale_combine_pred(imgs_dir, config, annot_path, vis_output_dir):
     total_gt_class_ids = np.array([]).astype(np.int32)
     current_subfolder = os.path.basename(os.path.normpath(imgs_dir))
     num_of_gts = []
+    pred_result_json = {}
 
     for image_name in os.listdir(imgs_dir):
         image_path = os.path.join(imgs_dir, image_name)
@@ -194,6 +200,16 @@ def scale_combine_pred(imgs_dir, config, annot_path, vis_output_dir):
 
         # predition and combination of masks
         pred_result = model.detect_multi_scale_and_combine_windowed(image, start_scale = 0.35, end_scale = 1.2, scale_step = 0.05, overlap_threshold=0.35)
+        
+          
+
+        pred_result_json[image_name] = {}
+        for i in range(len(pred_result["class_ids"])):
+            pred_result_json[image_name][str(i)] = {
+                "Mask": pred_result["masks"][..., i].tolist(),
+                "bbox": pred_result["rois"][i].tolist(),
+                "label": CLASS_NAMES[pred_result["class_ids"][i]]
+            }
 
 
         if (args.save_visualization):
@@ -211,6 +227,7 @@ def scale_combine_pred(imgs_dir, config, annot_path, vis_output_dir):
             total_gt_class_ids = np.concatenate([total_gt_class_ids, gt_class_ids])
             total_pred_class_ids = np.concatenate([total_pred_class_ids, pred_result['class_ids']])
 
+            # calculating num of gts
             temp_num_of_gts = [0 for _ in range(NUM_OF_USER_CLASS_TYPES)]
             for gt_class_id in gt_class_ids:
                 assert gt_class_id > 0
@@ -258,7 +275,10 @@ def scale_combine_pred(imgs_dir, config, annot_path, vis_output_dir):
             visualize.save_precision_recall_vs_thresholds(AP, precisions, recalls, thresholds,
                                                              save_path = os.path.join(precision_recall_vs_thresholds_dir, "precision_recall_vs_thresh_"+ base_name_wo_file_extension + ".png"))
 
-    
+    # save pred output to json in custom format
+    with open(os.path.join(pred_result_output_dir, "pred_result.json"), "w+") as file:
+        json.dump(pred_result_json, file, separators=(",",":"))
+
     del pred_result
 
     # save combined plots
@@ -463,32 +483,6 @@ def recall_rate(pred_result, num_of_gts):
 
     return img_rate, type_rate, total_rate, num_of_gts
 
-# def one_minus_precision_rate(pred_result):
-        
-
-#     img_rate, type_rate, total_rate, num_of_each_pred= precision_rate(pred_result)
-    
-#     img_rate = 1 - img_rate
-    
-#     type_rate = 1 - type_rate
-
-#     total_rate = 1 - total_rate
-    
-#     # print("output: ",output)
-#     return img_rate, type_rate, total_rate, num_of_each_pred
-
-# def one_minus_recall_rate(pred_result):
-
-#     img_rate, type_rate, total_rate, num_of_each_pred = recall_rate(pred_result)
-    
-#     img_rate = 1 - img_rate
-    
-#     type_rate = 1 - type_rate
-
-#     total_rate = 1 - total_rate
-    
-#     # print("output: ",output)
-#     return img_rate, type_rate, total_rate, num_of_each_pred
 
 def print_metric_of_set(type_rate ,total_rate, num_of_samples, heading, file=sys.stdout, ifRecall = True):
     # if not recall then precision
@@ -581,7 +575,6 @@ def print_metric_of_img_type(precision_img_rate_of_each_set , recall_img_rate_of
         
         print("\n=================================", file=file)
 
-
 # [num of sets, num of images, num of classes]
 recall_img_rate_of_each_set = []
 
@@ -607,10 +600,11 @@ for i, subfolder_name in enumerate(SUBFOLDERS):
     output_path = os.path.normpath(os.path.join(os.path.normpath(args.output_directory), subfolder_name, "result.txt"))
 
     vis_output_dir = os.path.normpath(os.path.join(os.path.normpath(args.output_directory), subfolder_name))
+    pred_result_output_dir = os.path.normpath(os.path.join(os.path.normpath(args.output_directory), subfolder_name))
 
     # calculate stats of the current set 
     # result: [num of images, num of gt pred pairs,("Img", "GT", "Pred", "Score", "IfValid")]
-    result, img_idx_order, num_of_gts = scale_combine_pred(images_dir, config, annot_path, vis_output_dir)
+    result, img_idx_order, num_of_gts = scale_combine_pred(images_dir, config, annot_path, vis_output_dir, pred_result_output_dir)
     img_idx_order_of_each_set.append(img_idx_order)
 
     if args.save_stats:
@@ -619,6 +613,7 @@ for i, subfolder_name in enumerate(SUBFOLDERS):
             result_csv_path = os.path.join(csv_dir, IMG_NAMES[img_idx] + ".csv")
             with open(result_csv_path, "w+") as csvfile:
                 csvwriter = csv.writer(csvfile)
+                csvwriter.writerow(CLASS_NAMES[1:])
                 csvwriter.writerow(fields)
                 csvwriter.writerows(result[i])
 

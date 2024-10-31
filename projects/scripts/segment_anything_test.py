@@ -27,7 +27,7 @@ def show_box(box, ax):
     w, h = box[2] - box[0], box[3] - box[1]
     ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2))    
 
-image = cv2.imdecode(np.fromfile(os.path.normpath(r'D:\Documents\GitRepos\RoadMaskRCNNAnnotations\測試\測試圖資\Google\0001.png'), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+image = cv2.imdecode(np.fromfile(os.path.normpath(r'C:\Users\Leo\Documents\GitRepos\RoadMaskRCNNAnnotations\測試\測試圖資\Google\0001.png'), dtype=np.uint8), cv2.IMREAD_UNCHANGED)
 image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
 plt.figure(figsize=(10,10))
@@ -40,7 +40,7 @@ import sys
 sys.path.append("..")
 from segment_anything import sam_model_registry, SamPredictor
 
-sam_checkpoint = os.path.normpath(r"D:\Documents\GitRepos\segment-anything\sam_vit_h_4b8939.pth")
+sam_checkpoint = os.path.normpath(r"C:\Users\Leo\Documents\GitRepos\segment-anything\sam_vit_h_4b8939.pth")
 model_type = "vit_h"
 
 device = "cuda"

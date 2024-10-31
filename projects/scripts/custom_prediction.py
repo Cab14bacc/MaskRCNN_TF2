@@ -124,7 +124,7 @@ def unscale_rois(rois, ori_shape, new_shape):
                 
 
 
-ifNone = True
+ifNone = False
 ifAug = True
 
 # load weights once, display multiple imgs  
@@ -183,9 +183,9 @@ while True:
         # r = model.detect([scaled_image], verbose=0)
         if ifNone:
             if ifAug:
-                r = model.detect_multi_scale_and_combine_windowed(augmented_img, start_scale, end_scale, scale_step, 0.9, verbose=0)
+                r = model.detect_multi_scale_and_combine_windowed(augmented_img, start_scale, end_scale, scale_step, 0.5, verbose=0)
             else:
-                r = model.detect_multi_scale_and_combine_windowed(image, start_scale, end_scale, scale_step, 0.9, verbose=0)
+                r = model.detect_multi_scale_and_combine_windowed(image, start_scale, end_scale, scale_step, 0.5, verbose=0)
         else:
             if ifAug:
                 r = model.detect([augmented_img], verbose=0)

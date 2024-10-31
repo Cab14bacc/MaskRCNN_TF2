@@ -2834,7 +2834,9 @@ class MaskRCNN(object):
                 rois[i] = rois[i] * np.array([*inverse_scale, *inverse_scale])
 
             return rois.astype(np.int32)
-                
+
+        print("Predicting in mode: ", self.config.IMAGE_RESIZE_MODE)
+        # if none mode
         if self.config.IMAGE_RESIZE_MODE == "none":
             if(scale_step != 0):
                 num_of_detect_per_image, remainder = divmod((end_scale - start_scale), scale_step)
@@ -2889,7 +2891,7 @@ class MaskRCNN(object):
                     "scores": scores,
                     "masks": masks
                     }
-        else:
+        else: # if square mode
             height, width , _ = image.shape
             scaled_images = []
 

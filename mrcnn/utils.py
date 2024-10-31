@@ -647,8 +647,8 @@ def minimize_masks_windowed(bboxes, masks):
         m = masks[:, :, i]
         y1, x1, y2, x2 = bboxes[i]
         m = m[y1:y2, x1:x2]
-        if m.size == 0:
-            raise Exception("Invalid bounding box with area of zero")
+        # if m.size == 0:
+        #     raise Exception("Invalid bounding box with area of zero")
         output_mask.append(m.astype(np.bool_))
     return output_mask
 

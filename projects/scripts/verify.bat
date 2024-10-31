@@ -18,13 +18,13 @@ set SCRIPT_PATH=.\result_auto_log.py
 
 set LABELS_TXT_PATH=..\TESTS\TEST10\labels.txt
 
-set SOURCE_IMG_DIR_PATH=D:\Documents\GitRepos\RoadMaskRCNNAnnotations\測試\測試圖資
+set SOURCE_IMG_DIR_PATH=C:\Users\Leo\Documents\GitRepos\RoadMaskRCNNAnnotations\測試\測試圖資
 
-set WEIGHTS_PATH=..\TESTS\TEST10\logs\custom_cfg20240930T2215\mask_rcnn_custom_cfg_0185.h5
+set WEIGHTS_PATH=..\TESTS\TEST10\output_weights\mask_rcnn_custom_cfg_0185.h5
 
-set OUTPUT_PATH=D:\Documents\GitRepos\RoadMaskRCNNAnnotations\測試\Test_Results\TEST10_e185_none_mode
+set OUTPUT_PATH=C:\Users\Leo\Documents\GitRepos\RoadMaskRCNNAnnotations\測試\Test_Results\TEST10_e185
 
-set ANNOT_PATH=D:\Documents\GitRepos\RoadMaskRCNNAnnotations\測試\測試圖資annot
+set ANNOT_PATH=C:\Users\Leo\Documents\GitRepos\RoadMaskRCNNAnnotations\測試\測試圖資annot
 
 
 
